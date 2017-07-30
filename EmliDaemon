@@ -1,0 +1,150 @@
+#!/bin/bash
+## Author: Emiliano Sauvisky
+## Name: EmliDaemon
+## Description: Daemon que executa várias funções dependendo do estado do computador
+
+# Verifica bibliotecas necessárias
+soft[0]="pgrep"
+soft[1]="xprintidle"
+soft[2]="xdotool"
+soft[3]="solaar"
+soft[4]="xinput"
+soft[5]="notify-send"
+for check in ${soft[@]}; do hash $check &>/dev/null || { echo >&2 "ERROR: $check doesn't exists in $PATH."; exit 1; }; done
+
+# Debug (redirecionar para $logfile se necessário)
+logFile=/home/esauvisky/.EmliDaemon.log
+function debug {
+    echo "$0: $1"
+}
+
+debug "########### New instance ###########"
+
+# Verifica se já existe uma instância rodando
+if [[ $(pgrep -fc "/usr/bin/EmliDaemon") -ge 2 ]]; then
+    debug "## Error! EmliDaemon is already running."
+    exit 1
+fi
+
+# Roda o daemon em baixa prioridade
+# *** ATENÇÃO: Todos os programas abertos por este script herdam estas prioridades!!
+debug "-> Setting low IO and CPU priority..."
+ionice -c 3 -p $$ 1>/dev/null
+renice +12  -p $$ 1>/dev/null
+
+# Verifica se o mouse externo está online/acessível
+function checkExternalMouse {
+    solaarOutput=$(solaar show Mouse 2>&1)
+    if [[ $(echo "$solaarOutput" | grep -c 'Battery: unknown') -eq 1 ]]; then
+        echo 0
+    elif [[ $(echo "$solaarOutput" | grep -c 'Battery:..*discharging') -eq 1 ]]; then
+        echo 1
+    elif [[ $(echo "$solaarOutput" | grep -c '0x100000') -eq 1 ]]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+# Muda a velocidade do cooler
+function changeFanSpeed {
+    current=$(i8kctl fan | sed 's/-1 *//')
+    if [[ "$1" != "$current" ]]; then
+        debug "Changing fan speed policy from $current to $1. Current fan speed is $(i8kctl speed | sed 's/-1 *//') rpm."
+        i8kfan - $1 >/dev/null
+    fi
+}
+
+#####################
+##### INIT EXEC #####
+#####################
+# TODO: Tentar arrumar pelo GDM:
+xmodmap ~/.Xmodmap
+
+#Incia o daemon do synaptics para digitar
+if [[ $(pgrep -fc "^syndaemon") -eq 0 ]]; then
+    syndaemon -i 1.5 -m 100 -d -t #-K
+fi
+
+# Inicia o F.lux
+if [[ $(pgrep -fc "^xflux") -eq 0 ]]; then
+    xflux -l -27.4108685 -g -48.4253953 -k 4200
+fi
+
+# Seta as variáveis iniciais do gerenciador de touchpad/mouse
+_theme=$(gsettings get org.gnome.desktop.interface icon-theme | tr -d "'")
+_iconMouse="/usr/share/icons/${_theme}/256x256/devices/input-mouse.png"
+_iconTouch="/usr/share/icons/${_theme}/256x256/devices/input-tablet.png"
+currentState=$(checkExternalMouse)
+touchpadEventId=$(xinput list "Synaptics s3203" | head -n1 | sed 's/..*id=\([0-9][0-9]*\)..*$/\1/')
+#touchpadEventId=$(xinput list "xwayland-pointer:13" | head -n1 | sed 's/..*id=\([0-9][0-9]*\)..*$/\1/')
+
+#####################
+##### MAIN LOOP #####
+#####################
+cycle=0
+while :; do
+    let cycle++
+    # Benchmark do tempo gasto no loop
+    # timeStart=$(echo "($(date +%s)*1000000000) + $(date +%N); scale=0" | bc)
+
+    # Ações em idle
+    idleTime=$(xprintidle)
+    if [[ $idleTime -gt 300000 ]]; then
+        true
+        #debug $(date +%H:%M:%S)": Is idle ($idleTime)"
+    else
+        true
+        #debug $(date +%H:%M:%S)": Not idle ($idleTime)"
+    fi
+
+    # Roda eBaygent a cada 5 minutos (60 ciclos)
+    if [[ $(($cycle%60)) -eq 0 ]]; then
+        LOG_LEVEL=6 eBaygent & disown
+    fi
+
+    # Mantém conexões FTP ativas, se existentes
+    for dir in /run/user/1000/gvfs/ftp*; do
+        if [[ -d "$dir" ]]; then
+            #debug "-> Found FTP connection: ${dir##/run/user/1000\/gvfs/}"
+            if [[ $(ps -Af | grep -c "ls $dir") -eq 1 ]]; then
+                debug "-> Sending keep-alive to ${dir#*gvfs/}..."
+                ls "$dir" &>/dev/null & disown
+            fi
+        fi
+    done
+
+    #Se o mouse externo estiver conectado, desliga o touchpad e vice-versa
+    isExternalMouseConnected=$(checkExternalMouse)
+    if [[ $isExternalMouseConnected -eq 0 && $currentState -eq 0 ]]; then
+        currentState=1
+        xinput enable $touchpadEventId
+        #notify-send -i $_iconTouch -t 1 "No USB mouse found" "Your touchpad is set to ON"
+        debug "No external mouse detected, enabling touchpad ID: $touchpadEventId..."
+    elif [[ $isExternalMouseConnected -ge 1 && $currentState -ge 1 ]]; then
+        currentState=0
+        xinput disable $touchpadEventId
+        #notify-send -i $_iconMouse -t 1 "USB mouse plugged" "Your touchpad is now turned OFF"
+        debug "External mouse detected, disabling touchpad... ID: $touchpadEventId"
+    fi
+
+    # Gerenciamento do cooler
+    #if [[ $(acpi -a | grep -c 'on-line') -eq 1 ]]; then
+    #    changeFanSpeed "2"
+    #elif [[ $(i8kctl temp) -ge 55 ]]; then
+    #    #debug "WARNING: Core temperature is higher than 55ºC! Increasing fan speed..."
+    #    changeFanSpeed "2"
+    #elif [[ $(i8kctl speed | sed 's/-1 *//') -le 2000 ]]; then
+    #    debug "WARNING: Fan speed is too low (less than 2000 rpm)! Increasing fan speed..."
+    #    changeFanSpeed "2"
+    #elif [[ $(acpi -a | grep -c 'off-line') -eq 1 ]]; then
+    #    changeFanSpeed "1"
+    #fi
+
+    # Benchmark do tempo gasto no loop
+    # timeEnd=$(echo "( $(date +%s) * 1000000000 ) + $(date +%N); scale=0" | bc)
+    # timeTotal=$( echo "($timeEnd - $timeStart)/1000000; scale=0" | bc)
+    # debug "Total loop runtime (without delay): ${timeTotal}ms"
+
+    sleep 5s
+done
