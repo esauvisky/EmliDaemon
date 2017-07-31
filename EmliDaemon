@@ -34,15 +34,10 @@ renice +12  -p $$ 1>/dev/null
 
 # Verifica se o mouse externo está online/acessível
 function checkExternalMouse {
-    solaarOutput=$(solaar show Mouse 2>&1)
-    if [[ $(echo "$solaarOutput" | grep -c 'Battery: unknown') -eq 1 ]]; then
+    if [[ $(ltunify info mouse | grep 'unavailable') ]]; then
         echo 0
-    elif [[ $(echo "$solaarOutput" | grep -c 'Battery:..*discharging') -eq 1 ]]; then
-        echo 1
-    elif [[ $(echo "$solaarOutput" | grep -c '0x100000') -eq 1 ]]; then
-        echo 1
     else
-        echo 0
+        echo 1
     fi
 }
 
