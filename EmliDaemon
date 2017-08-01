@@ -7,7 +7,7 @@
 soft[0]="pgrep"
 soft[1]="xprintidle"
 soft[2]="xdotool"
-soft[3]="solaar"
+soft[3]="ltunify"
 soft[4]="xinput"
 soft[5]="notify-send"
 for check in ${soft[@]}; do hash $check &>/dev/null || { echo >&2 "ERROR: $check doesn't exists in $PATH."; exit 1; }; done
